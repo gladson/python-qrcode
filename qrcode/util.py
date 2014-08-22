@@ -1,6 +1,9 @@
 import re
 import math
 
+import six
+from six.moves import xrange
+
 from qrcode import base, exceptions
 
 # QR encoding modes.
@@ -29,7 +32,8 @@ MODE_SIZE_LARGE = {
     MODE_KANJI: 12,
 }
 
-ALPHA_NUM = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:'
+ALPHA_NUM = six.b('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:')
+RE_ALPHA_NUM = re.compile(six.b('^[') + re.escape(ALPHA_NUM) + six.b(']*\Z'))
 
 # The number of bits for numeric delimited data lengths.
 NUMBER_LENGTH = {3: 10, 2: 7, 1: 4}
@@ -86,6 +90,14 @@ G15_MASK = (1 << 14) | (1 << 12) | (1 << 10) | (1 << 4) | (1 << 1)
 PAD0 = 0xEC
 PAD1 = 0x11
 
+# Precompute bit count limits, indexed by error correction level and code size
+_data_count = lambda block: block.data_count
+BIT_LIMIT_TABLE = [
+    [0] + [8*sum(map(_data_count, base.rs_blocks(version, error_correction)))
+           for version in xrange(1, 41)]
+    for error_correction in xrange(4)
+]
+
 
 def BCH_type_info(data):
         d = data << 10
@@ -136,6 +148,13 @@ def mask_func(pattern):
         return lambda i, j: ((i * j) % 3 + (i + j) % 2) % 2 == 0
     raise TypeError("Bad mask pattern: " + pattern)
 
+def mode_sizes_for_version(version):
+    if version < 10:
+        return MODE_SIZE_SMALL
+    elif version < 27:
+        return MODE_SIZE_MEDIUM
+    else:
+        return MODE_SIZE_LARGE
 
 def length_in_bits(mode, version):
     if mode not in (MODE_NUMBER, MODE_ALPHA_NUM, MODE_8BIT_BYTE,
@@ -146,14 +165,7 @@ def length_in_bits(mode, version):
         raise ValueError("Invalid version (was %s, expected 1 to 40)" %
             version)
 
-    if version < 10:
-        mode_size = MODE_SIZE_SMALL
-    elif version < 27:
-        mode_size = MODE_SIZE_MEDIUM
-    else:
-        mode_size = MODE_SIZE_LARGE
-
-    return mode_size[mode]
+    return mode_sizes_for_version(version)[mode]
 
 
 def lost_point(modules):
@@ -161,63 +173,109 @@ def lost_point(modules):
 
     lost_point = 0
 
-    # LEVEL1
+    lost_point = _lost_point_level1(modules, modules_count)
+    lost_point += _lost_point_level2(modules, modules_count)
+    lost_point += _lost_point_level3(modules, modules_count)
+    lost_point += _lost_point_level4(modules, modules_count)
 
-    for row in range(modules_count):
+    return lost_point
 
-        for col in range(modules_count):
+
+def _lost_point_level1(modules, modules_count):
+    lost_point = 0
+
+    modules_range = xrange(modules_count)
+    row_range_first = (0, 1)
+    row_range_last = (-1, 0)
+    row_range_standard = (-1, 0, 1)
+
+    col_range_first = ((0, 1), (1,))
+    col_range_last = ((-1, 0), (-1,))
+    col_range_standard = ((-1, 0, 1), (-1, 1))
+
+    for row in modules_range:
+
+        if row == 0:
+            row_range = row_range_first
+        elif row == modules_count-1:
+            row_range = row_range_last
+        else:
+            row_range = row_range_standard
+
+        for col in modules_range:
 
             sameCount = 0
             dark = modules[row][col]
 
-            for r in range(-1, 2):
+            if col == 0:
+                col_range = col_range_first
+            elif col == modules_count-1:
+                col_range = col_range_last
+            else:
+                col_range = col_range_standard
 
-                if row + r < 0 or modules_count <= row + r:
-                    continue
+            for r in row_range:
 
-                for c in range(-1, 2):
+                row_offset = row + r
 
-                    if col + c < 0 or modules_count <= col + c:
-                        continue
-                    if r == 0 and c == 0:
-                        continue
+                if r != 0:
+                    col_idx = 0
+                else:
+                    col_idx = 1
 
-                    if dark == modules[row + r][col + c]:
+                for c in col_range[col_idx]:
+
+                    if dark == modules[row_offset][col + c]:
                         sameCount += 1
+
             if sameCount > 5:
                 lost_point += (3 + sameCount - 5)
 
-    # LEVEL2
+    return lost_point
 
-    for row in range(modules_count - 1):
-        for col in range(modules_count - 1):
+
+def _lost_point_level2(modules, modules_count):
+    lost_point = 0
+
+    modules_range = xrange(modules_count - 1)
+
+    for row in modules_range:
+        this_row = modules[row]
+        next_row = modules[row+1]
+        for col in modules_range:
             count = 0
-            if modules[row][col]:
+            if this_row[col]:
                 count += 1
-            if modules[row + 1][col]:
+            if next_row[col]:
                 count += 1
-            if modules[row][col + 1]:
+            if this_row[col + 1]:
                 count += 1
-            if modules[row + 1][col + 1]:
+            if next_row[col + 1]:
                 count += 1
             if count == 0 or count == 4:
                 lost_point += 3
 
-    # LEVEL3
+    return lost_point
 
-    for row in range(modules_count):
-        for col in range(modules_count - 6):
-            if (modules[row][col]
-                    and not modules[row][col + 1]
-                    and modules[row][col + 2]
-                    and modules[row][col + 3]
-                    and modules[row][col + 4]
-                    and not modules[row][col + 5]
-                    and modules[row][col + 6]):
+
+def _lost_point_level3(modules, modules_count):
+    modules_range_short = xrange(modules_count-6)
+
+    lost_point = 0
+    for row in xrange(modules_count):
+        this_row = modules[row]
+        for col in modules_range_short:
+            if (this_row[col]
+                    and not this_row[col + 1]
+                    and this_row[col + 2]
+                    and this_row[col + 3]
+                    and this_row[col + 4]
+                    and not this_row[col + 5]
+                    and this_row[col + 6]):
                 lost_point += 40
 
-    for col in range(modules_count):
-        for row in range(modules_count - 6):
+    for col in xrange(modules_count):
+        for row in modules_range_short:
             if (modules[row][col]
                     and not modules[row + 1][col]
                     and modules[row + 2][col]
@@ -227,19 +285,80 @@ def lost_point(modules):
                     and modules[row + 6][col]):
                 lost_point += 40
 
-    # LEVEL4
-
-    darkCount = 0
-
-    for col in range(modules_count):
-        for row in range(modules_count):
-            if modules[row][col]:
-                darkCount += 1
-
-    ratio = abs(100 * darkCount / modules_count / modules_count - 50) / 5
-    lost_point += ratio * 10
-
     return lost_point
+
+
+def _lost_point_level4(modules, modules_count):
+    modules_range = xrange(modules_count)
+    dark_count = 0
+
+    for row in modules_range:
+        this_row = modules[row]
+        for col in modules_range:
+            if this_row[col]:
+                dark_count += 1
+
+    ratio = abs(100 * dark_count / modules_count / modules_count - 50) / 5
+    return ratio * 10
+
+
+def optimal_data_chunks(data, minimum=4):
+    """
+    An iterator returning QRData chunks optimized to the data content.
+
+    :param minimum: The minimum number of bytes in a row to split as a chunk.
+    """
+    data = to_bytestring(data)
+    re_repeat = six.b('{') + six.text_type(minimum).encode('ascii') + six.b(',}')
+    num_pattern = re.compile(six.b('\d') + re_repeat)
+    num_bits = _optimal_split(data, num_pattern)
+    alpha_pattern = re.compile(
+        six.b('[') + re.escape(ALPHA_NUM) + six.b(']') + re_repeat)
+    for is_num, chunk in num_bits:
+        if is_num:
+            yield QRData(chunk, mode=MODE_NUMBER, check_data=False)
+        else:
+            for is_alpha, sub_chunk in _optimal_split(chunk, alpha_pattern):
+                if is_alpha:
+                    mode = MODE_ALPHA_NUM
+                else:
+                    mode = MODE_8BIT_BYTE
+                yield QRData(sub_chunk, mode=mode, check_data=False)
+
+
+def _optimal_split(data, pattern):
+    while data:
+        match = re.search(pattern, data)
+        if not match:
+            break
+        start, end = match.start(), match.end()
+        if start:
+            yield False, data[:start]
+        yield True, data[start:end]
+        data = data[end:]
+    if data:
+        yield False, data
+
+
+def to_bytestring(data):
+    """
+    Convert data to a (utf-8 encoded) byte-string if it isn't a byte-string
+    already.
+    """
+    if not isinstance(data, six.binary_type):
+        data = six.text_type(data).encode('utf-8')
+    return data
+
+
+def optimal_mode(data):
+    """
+    Calculate the optimal mode for this chunk of data.
+    """
+    if data.isdigit():
+        return MODE_NUMBER
+    if RE_ALPHA_NUM.match(data):
+        return MODE_ALPHA_NUM
+    return MODE_8BIT_BYTE
 
 
 class QRData:
@@ -249,36 +368,24 @@ class QRData:
     Doesn't currently handle KANJI.
     """
 
-    def __init__(self, data, mode=None):
+    def __init__(self, data, mode=None, check_data=True):
         """
         If ``mode`` isn't provided, the most compact QR data type possible is
         chosen.
         """
-        # Convert data to a (utf-8 encoded) byte-string.
-        if not isinstance(data, basestring):
-            try:
-                data = str(data)
-            except UnicodeEncodeError:
-                data = unicode(data)
-        if isinstance(data, unicode):
-            data = data.encode('utf-8')
-
-        if data.isdigit():
-            auto_mode = MODE_NUMBER
-        elif re.match('^[%s]*$' % re.escape(ALPHA_NUM), data):
-            auto_mode = MODE_ALPHA_NUM
-        else:
-            auto_mode = MODE_8BIT_BYTE
+        if check_data:
+            data = to_bytestring(data)
 
         if mode is None:
-            self.mode = auto_mode
+            self.mode = optimal_mode(data)
         else:
+            self.mode = mode
             if mode not in (MODE_NUMBER, MODE_ALPHA_NUM, MODE_8BIT_BYTE):
                 raise TypeError("Invalid mode (%s)" % mode)
-            if mode < auto_mode:
-                raise ValueError("Provided data can not be represented in "
-                    "mode %s" % mode)
-            self.mode = mode
+            if check_data and mode < optimal_mode(data):
+                raise ValueError(
+                    "Provided data can not be represented in mode "
+                    "{0}".format(mode))
 
         self.data = data
 
@@ -300,11 +407,17 @@ class QRData:
                 else:
                     buffer.put(ALPHA_NUM.find(chars), 6)
         else:
-            for c in self.data:
-                buffer.put(ord(c), 8)
+            if six.PY3:
+                # Iterating a bytestring in Python 3 returns an integer,
+                # no need to ord().
+                data = self.data
+            else:
+                data = [ord(c) for c in self.data]
+            for c in data:
+                buffer.put(c, 8)
 
     def __repr__(self):
-        return self.data
+        return repr(self.data)
 
 
 class BitBuffer:
@@ -426,9 +539,12 @@ def create_data(version, error_correction, data_list):
         for i in range(8 - delimit):
             buffer.put_bit(False)
 
-    # Add special alternating padding bitstrings until buffer if full.
+    # Add special alternating padding bitstrings until buffer is full.
     bytes_to_fill = (bit_limit - len(buffer)) // 8
     for i in range(bytes_to_fill):
-        buffer.put(PAD0 if i % 2 == 0 else PAD1, 8)
+        if i % 2 == 0:
+            buffer.put(PAD0, 8)
+        else:
+            buffer.put(PAD1, 8)
 
     return create_bytes(buffer, rs_blocks)

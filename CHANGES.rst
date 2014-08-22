@@ -2,6 +2,106 @@
 Change log
 ==========
 
+HEAD
+====
+
+* 
+
+
+Version 5.0
+===========
+
+* Speed optimizations.
+
+* Change the output when using the ``qr`` script to use ASCII rather than
+  just colors, better using the terminal real estate.
+
+* Fix a bug in passing bytecode data directly when in Python 3.
+
+* Substation speed optimizations to best-fit algorithm (thanks Jacob Welsh!).
+
+Version 5.0.1
+-------------
+
+* Update version numbers correctly.
+
+
+Version 4.0
+===========
+
+* Made qrcode work on Python 2.4 - Thanks tcely.
+  Note: officially, qrcode only supports 2.5+.
+
+* Support pure-python PNG generation (via pymaging) for Python 2.6+ -- thanks
+  Adam Wisniewski!
+
+* SVG image generation now supports alternate sizing (the default box size of
+  10 == 1mm per rectangle).
+
+* SVG path image generation allows cleaner SVG output by combining all QR rects
+  into a single path. Thank you, Viktor Stískala.
+
+* Added some extra simple SVG factories that fill the background white.
+
+Version 4.0.1
+-------------
+
+* Fix the pymaging backend not able to save the image to a buffer. Thanks ilj!
+
+Version 4.0.2
+-------------
+
+* Fix incorrect regex causing a comma to be considered part of the alphanumeric
+  set.
+
+* Switch to using setuptools for setup.py.
+
+Version 4.0.3
+-------------
+
+* Fix bad QR code generation due to the regex comma fix in version 4.0.2.
+
+Version 4.0.4
+-------------
+
+* Bad version number for previous hotfix release.
+
+
+Version 3.1
+===========
+
+* Important fixes for incorrect matches of the alpha-numeric encoding mode.
+  Previously, the pattern would match if a single line was alpha-numeric only
+  (even if others wern't). Also, the two characters ``{`` and ``}`` had snuck
+  in as valid characters. Thanks to Eran Tromer for the report and fix.
+
+* Optimized chunking -- if the parts of the data stream can be encoded more
+  efficiently, the data will be split into chunks of the most efficient modes.
+
+Version 3.1.1
+-------------
+
+* Update change log to contain version 3.1 changes. :P
+
+* Give the ``qr`` script an ``--optimize`` argument to control the chunk
+  optimization setting.
+
+
+Version 3.0
+===========
+
+* Python 3 support.
+
+* Add QRCode.get_matrix, an easy way to get the matrix array of a QR code
+  including the border. Thanks Hugh Rawlinson.
+
+* Add in a workaround so that Python 2.6 users can use SVG generation (they
+  must install ``lxml``).
+
+* Some initial tests! And tox support (``pip install tox``) for testing across
+  Python platforms.
+
+
 Version 2.7
 ===========
 

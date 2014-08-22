@@ -1,6 +1,9 @@
 from qrcode import constants, exceptions, util
 from qrcode.image.base import BaseImage
 
+import six
+from bisect import bisect_left
+
 
 def make(data=None, **kwargs):
     qr = QRCode(**kwargs)
@@ -34,13 +37,21 @@ class QRCode:
         self.data_cache = None
         self.data_list = []
 
-    def add_data(self, data):
+    def add_data(self, data, optimize=20):
         """
         Add data to this QR Code.
+
+        :param optimize: Data will be split into multiple chunks to optimize
+            the QR size by finding to more compressed modes of at least this
+            length. Set to ``0`` to avoid optimizing at all.
         """
-        if not isinstance(data, util.QRData):
-            data = util.QRData(data)
-        self.data_list.append(data)
+        if isinstance(data, util.QRData):
+            self.data_list.append(data)
+        else:
+            if optimize:
+                self.data_list.extend(util.optimal_data_chunks(data))
+            else:
+                self.data_list.append(util.QRData(data))
         self.data_cache = None
 
     def make(self, fit=True):
@@ -102,16 +113,32 @@ class QRCode:
         """
         Find the minimum size required to fit in the data.
         """
-        size = start or 1
-        while True:
-            try:
-                self.data_cache = util.create_data(
-                    size, self.error_correction, self.data_list)
-            except exceptions.DataOverflowError:
-                size += 1
-            else:
-                self.version = size
-                return size
+        if start is None:
+            start = 1
+        elif start < 1 or start > 40:
+            raise ValueError("Invalid version (was %s, expected 1 to 40)" %
+                version)
+
+        # Corresponds to the code in util.create_data, except we don't yet know
+        # version, so optimistically assume start and check later
+        mode_sizes = util.mode_sizes_for_version(start)
+        buffer = util.BitBuffer()
+        for data in self.data_list:
+            buffer.put(data.mode, 4)
+            buffer.put(len(data), mode_sizes[data.mode])
+            data.write(buffer)
+
+        needed_bits = len(buffer)
+        self.version = bisect_left(util.BIT_LIMIT_TABLE[self.error_correction],
+                                   needed_bits, start)
+        if self.version == 41:
+            raise exceptions.DataOverflowError()
+
+        # Now check whether we need more bits for the mode sizes, recursing if
+        # our guess was too low
+        if mode_sizes is not util.mode_sizes_for_version(self.version):
+            self.best_fit(start=self.version)
+        return self.version
 
     def best_mask_pattern(self):
         """
@@ -133,7 +160,7 @@ class QRCode:
 
     def print_tty(self, out=None):
         """
-        Output the QR Code to a TTY (potentially useful for debugging).
+        Output the QR Code only using TTY colors.
 
         If the data has not been compiled yet, make it first.
         """
@@ -160,7 +187,53 @@ class QRCode:
         out.write("\x1b[1;47m" + (" " * (modcount * 2 + 4)) + "\x1b[0m\n")
         out.flush()
 
-    def make_image(self, image_factory=None):
+    def print_ascii(self, out=None, tty=False, invert=False):
+        """
+        Output the QR Code using ASCII characters.
+
+        :param tty: use fixed TTY color codes (forces invert=True)
+        :param invert: invert the ASCII characters (solid <-> transparent)
+        """
+        if out is None:
+            import sys
+            out = sys.stdout
+
+        if tty and not out.isatty():
+            raise OSError("Not a tty")
+
+        if self.data_cache is None:
+            self.make()
+
+        modcount = self.modules_count
+        codes = [
+            chr(code).decode('cp437') for code in (255, 223, 220, 219)]
+        if tty:
+            invert = True
+        if invert:
+            codes.reverse()
+
+        def get_module(x, y):
+            if (invert and self.border and
+                    max(x, y) >= modcount+self.border):
+                return 1
+            if min(x, y) < 0 or max(x, y) >= modcount:
+                return 0
+            return self.modules[x][y]
+
+        for r in range(-self.border, modcount+self.border, 2):
+            if tty:
+                if not invert or r < modcount+self.border-1:
+                    out.write('\x1b[48;5;232m')   # Background black
+                out.write('\x1b[38;5;255m')   # Foreground white
+            for c in range(-self.border, modcount+self.border):
+                pos = get_module(r, c) + (get_module(r+1, c) << 1)
+                out.write(codes[pos])
+            if tty:
+                out.write('\x1b[0m')
+            out.write('\n')
+        out.flush()
+
+    def make_image(self, image_factory=None, **kwargs):
         """
         Make an image from the QR Code data.
 
@@ -178,7 +251,8 @@ class QRCode:
                 from qrcode.image.pil import PilImage
                 image_factory = PilImage
 
-        im = image_factory(self.border, self.modules_count, self.box_size)
+        im = image_factory(
+            self.border, self.modules_count, self.box_size, **kwargs)
         for r in range(self.modules_count):
             for c in range(self.modules_count):
                 if self.modules[r][c]:
@@ -269,26 +343,30 @@ class QRCode:
 
         mask_func = util.mask_func(mask_pattern)
 
-        for col in range(self.modules_count - 1, 0, -2):
+        data_len = len(data)
+
+        for col in six.moves.xrange(self.modules_count - 1, 0, -2):
 
             if col <= 6:
                 col -= 1
 
+            col_range = (col, col-1)
+
             while True:
 
-                for c in range(2):
+                for c in col_range:
 
-                    if self.modules[row][col - c] is None:
+                    if self.modules[row][c] is None:
 
                         dark = False
 
-                        if byteIndex < len(data):
+                        if byteIndex < data_len:
                             dark = (((data[byteIndex] >> bitIndex) & 1) == 1)
 
-                        if mask_func(row, col - c):
+                        if mask_func(row, c):
                             dark = not dark
 
-                        self.modules[row][col - c] = dark
+                        self.modules[row][c] = dark
                         bitIndex -= 1
 
                         if bitIndex == -1:
@@ -301,3 +379,24 @@ class QRCode:
                     row -= inc
                     inc = -inc
                     break
+
+    def get_matrix(self):
+        """
+        Return the QR Code as a multidimensonal array, including the border.
+
+        To return the array without a border, set ``self.border`` to 0 first.
+        """
+        if self.data_cache is None:
+            self.make()
+
+        if not self.border:
+            return self.modules
+
+        width = len(self.modules) + self.border*2
+        code = [[False]*width] * self.border
+        x_border = [False]*self.border
+        for module in self.modules:
+            code.append(x_border + module + x_border)
+        code += [[False]*width] * self.border
+
+        return code
